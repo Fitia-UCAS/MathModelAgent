@@ -12,7 +12,7 @@ class CoordinatorAgent(Agent):
         self,
         task_id: str,
         model: LLM,
-        max_chat_turns: int = 30,
+        max_chat_turns: int = 600,
     ) -> None:
         super().__init__(task_id, model, max_chat_turns)
         self.system_prompt = COORDINATOR_PROMPT

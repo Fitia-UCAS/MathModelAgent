@@ -14,7 +14,7 @@ class ModelerAgent(Agent):  # 继承自Agent类
         self,
         task_id: str,
         model: LLM,
-        max_chat_turns: int = 30,  # 添加最大对话轮次限制
+        max_chat_turns: int = 600,  # 添加最大对话轮次限制
     ) -> None:
         super().__init__(task_id, model, max_chat_turns)
         self.system_prompt = MODELER_PROMPT

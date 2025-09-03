@@ -13,7 +13,7 @@ async def create_interpreter(
     task_id: str,
     work_dir: str,
     notebook_serializer: NotebookSerializer,
-    timeout=3000,
+    timeout=36000,
 ):
     if not settings.E2B_API_KEY:
         logger.info("默认使用本地解释器")

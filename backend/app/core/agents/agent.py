@@ -11,7 +11,7 @@ class Agent:
         self,
         task_id: str,
         model: LLM,
-        max_chat_turns: int = 30,  # 单个agent最大对话轮次
+        max_chat_turns: int = 600,  # 单个agent最大对话轮次
         max_memory: int = 12,  # 最大记忆轮次
     ) -> None:
         self.task_id = task_id

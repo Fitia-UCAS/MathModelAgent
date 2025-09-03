@@ -21,7 +21,7 @@ class WriterAgent(Agent):  # 同样继承自Agent类
         self,
         task_id: str,
         model: LLM,
-        max_chat_turns: int = 10,  # 添加最大对话轮次限制
+        max_chat_turns: int = 600,  # 添加最大对话轮次限制
         comp_template: CompTemplate = CompTemplate,
         format_output: FormatOutPut = FormatOutPut.Markdown,
         scholar: OpenAlexScholar = None,
