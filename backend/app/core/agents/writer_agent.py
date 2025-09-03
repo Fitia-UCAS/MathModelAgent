@@ -11,6 +11,10 @@ from app.core.functions import writer_tools
 from icecream import ic
 from app.schemas.A2A import WriterResponse
 
+# ==== 新增：图片分配与审计（按部分专属目录 + 跨部分禁用 + 单次引用 + 清单持久化） ====
+from app.core.agents.agent_utils import WriterImageManager
+# ==============================================================================
+
 
 # 长文本
 # TODO: 并行 parallel
@@ -35,6 +39,10 @@ class WriterAgent(Agent):  # 同样继承自Agent类
         self.system_prompt = get_writer_prompt(format_output)
         self.available_images: list[str] = []
 
+        # ==== 新增：初始化图片管理器（清单：<WORK_BASE>/<task_id>/res_used_image.json） ====
+        self.image_mgr = WriterImageManager(task_id=self.task_id)
+        # ======================================================================
+
     async def run(
         self,
         prompt: str,
@@ -56,13 +64,27 @@ class WriterAgent(Agent):  # 同样继承自Agent类
                 {"role": "system", "content": self.system_prompt}
             )
 
-        if available_images:
-            self.available_images = available_images
-            # 拼接成完整URL
-            image_list = ",".join(available_images)
+        # ==== 新增（最小改动）：使用现成 available_images，按“部分专属目录 + 跨部分唯一”过滤，并把图片约束拼进 prompt ====
+        # 规则：ques1 → 仅 ques1/figures/；ques2 → 仅 ques2/figures/；eda → 仅 eda/figures/；
+        #       sensitivity_analysis → 仅 sensitivity_analysis/figures/；且每张图本部分最多引用一次，跨部分禁止复用
+        final_prompt, filtered_images = self.image_mgr.pre_run_prepare_prompt(
+            section_name=sub_title or "",
+            base_prompt=prompt,
+            available_images=available_images or [],
+        )
+        prompt = final_prompt
+        # =============================================================================================================
+
+        if filtered_images:
+            self.available_images = filtered_images
+            # 拼接成完整URL（沿用你的原逻辑，但内容来自“过滤后”的列表，确保只给合法候选）
+            image_list = ",".join(filtered_images)
             image_prompt = f"\n可用的图片链接列表：\n{image_list}\n请在写作时适当引用这些图片链接。"
             logger.info(f"image_prompt是:{image_prompt}")
             prompt = prompt + image_prompt
+        else:
+            self.available_images = []
+            logger.info("本部分无可用图片或均已被其他部分使用：禁止插图")
 
         logger.info(f"{self.__class__.__name__}:开始:执行对话")
         self.current_chat_turns += 1  # 重置对话轮次计数器
@@ -138,6 +160,22 @@ class WriterAgent(Agent):  # 同样继承自Agent类
             response_content = response.choices[0].message.content
         self.chat_history.append({"role": "assistant", "content": response_content})
         logger.info(f"{self.__class__.__name__}:完成:执行对话")
+
+        # ==== 新增（最小改动）：写作后登记与校验（一次性 / 跨部分 / 目录越界），清单写入 <task_id>/res_used_image.json ====
+        try:
+            audit = self.image_mgr.post_run_validate_and_register(
+                section_name=sub_title or "",
+                response_text=response_content,
+                filtered_images=self.available_images,  # 仅限本部分允许的候选集合
+            )
+            logger.info(
+                f"写作手图片审计结果: used={audit.get('used_images')}, "
+                f"violations={audit.get('violations')}, manifest={audit.get('manifest_path')}"
+            )
+        except Exception as e:
+            logger.error(f"写作手图片审计登记失败: {str(e)}")
+        # ==============================================================================================================
+
         return WriterResponse(response_content=response_content, footnotes=footnotes)
 
     async def summarize(self) -> str:
