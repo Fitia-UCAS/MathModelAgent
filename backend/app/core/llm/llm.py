@@ -1,3 +1,4 @@
+import asyncio
 import json
 from app.utils.common_utils import transform_link, split_footnotes
 from app.utils.log_util import logger
@@ -15,8 +16,10 @@ import litellm
 from app.schemas.enums import AgentType
 from app.utils.track import agent_metrics
 from icecream import ic
-
+# ==== 新增：llm 输出不符合规范的保护，debug预览 ====
+from app.core.llm.llm_utils import sanitize_messages, pretty_preview_messages
 litellm.callbacks = [agent_metrics]
+# ==============================================================================
 
 
 class LLM:
@@ -39,18 +42,28 @@ class LLM:
         history: list = None,
         tools: list = None,
         tool_choice: str = None,
-        max_retries: int = 8,  # 添加最大重试次数
+        max_retries: int = 60,  # 添加最大重试次数
         retry_delay: float = 1.0,  # 添加重试延迟
         top_p: float | None = None,  # 添加top_p参数,
         agent_name: AgentType = AgentType.SYSTEM,  # CoderAgent or WriterAgent
         sub_title: str | None = None,
-    ) -> str:
+
+    # ==== 修改应用 ====
+    ) -> object:
+        # 1 记录副标题
         logger.info(f"subtitle是:{sub_title}")
 
         # 验证和修复工具调用完整性
-        if history:
-            history = self._validate_and_fix_tool_calls(history)
+        # 2 历史最小规范化（仅合并相邻 user/assistant）
+        # 2.1 始终调用：避免 history=None 直接传给 API
+        history = sanitize_messages(history or [], tools=None)
+        # 2.2 兜底：仍为空则补一条最小 user
+        if not history:
+            history = [{"role": "user", "content": "[承接上文上下文] 继续。"}]
+        logger.info("🧾 messages 预览：\n" + pretty_preview_messages(history))
+    # ==============================================================================
 
+        # 3 组装请求
         kwargs = {
             "api_key": self.api_key,
             "model": self.model,
@@ -59,18 +72,17 @@ class LLM:
             "top_p": top_p,
             "metadata": {"agent_name": agent_name},
         }
-
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
         if self.max_tokens:
             kwargs["max_tokens"] = self.max_tokens
-
         if self.base_url:
             kwargs["base_url"] = self.base_url
 
         # TODO: stream 输出
+        # 4 调用与重试
         for attempt in range(max_retries):
             try:
                 # completion = self.client.chat.completions.create(**kwargs)
@@ -84,7 +96,9 @@ class LLM:
             except (json.JSONDecodeError, litellm.InternalServerError) as e:
                 logger.error(f"第{attempt + 1}次重试: {str(e)}")
                 if attempt < max_retries - 1:  # 如果不是最后一次尝试
-                    time.sleep(retry_delay * (attempt + 1))  # 指数退避
+                    # ==== 使用 asyncio.sleep，避免阻塞事件循环 ====
+                    asyncio.sleep(retry_delay * (attempt + 1))  # 指数退避
+                    # ==============================================================================
                     continue
                 logger.debug(f"请求参数: {kwargs}")
                 raise  # 如果所有重试都失败，则抛出异常
