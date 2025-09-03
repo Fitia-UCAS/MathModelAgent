@@ -7,3 +7,6 @@ backend/app/.DS_Store
 .Spotlight-V100
 .Trashes
 .idea/
+/ques
+/tools
+.env
