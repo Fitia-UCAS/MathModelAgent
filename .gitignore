@@ -8,5 +8,4 @@ backend/app/.DS_Store
 .Trashes
 .idea/
 /ques
-/tools
 .env
