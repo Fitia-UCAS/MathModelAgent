@@ -1,6 +1,7 @@
 from app.tools.base_interpreter import BaseCodeInterpreter
 from app.tools.notebook_serializer import NotebookSerializer
 import jupyter_client
+from jupyter_client import KernelManager
 from app.utils.log_util import logger
 import os
 from app.services.redis_manager import redis_manager
@@ -27,31 +28,112 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
         # 本地内核一般不需异步上传文件，直接切换目录即可
         # 初始化 Jupyter 内核管理器和客户端
         logger.info("初始化本地内核")
-        self.km, self.kc = jupyter_client.manager.start_new_kernel(
-            kernel_name="python3"
-        )
+
+        kernel_name = (os.environ.get("MMA_KERNEL_NAME") or "").strip()
+        python_exe = (os.environ.get("MMA_PYTHON_EXE") or "").strip()
+
+        try:
+            if kernel_name:
+                logger.info(f"使用指定内核名称启动 Jupyter Kernel: {kernel_name}")
+                try:
+                    self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name=kernel_name)
+                except Exception as e:
+                    logger.exception(f"通过 kernel_name 启动内核失败，尝试回退到默认 'python3'：{e}")
+                    self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name="python3")
+            elif python_exe:
+                logger.info(f"使用指定 Python 可执行文件启动 ipykernel: {python_exe}")
+                km = KernelManager()
+                km.kernel_cmd = [python_exe, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+                km.start_kernel()
+                kc = km.client()
+                kc.start_channels()
+                self.km, self.kc = km, kc
+            else:
+                logger.info("未设置 MMA_KERNEL_NAME / MMA_PYTHON_EXE，使用默认 kernel_name='python3'")
+                self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name="python3")
+        except Exception:
+            logger.exception("启动内核时发生异常，尝试直接用默认 python3 再次启动")
+            self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name="python3")
+
+        # 确保工作目录存在并切换
+        self._create_work_dir()
+        # 使用你指定的简洁预执行代码
         self._pre_execute_code()
 
     def _pre_execute_code(self):
         init_code = (
-            f"import os\n"
-            f"work_dir = r'{self.work_dir}'\n"
-            f"os.makedirs(work_dir, exist_ok=True)\n"
-            f"os.chdir(work_dir)\n"
-            f"print('当前工作目录:', os.getcwd())\n"
-            # f"import matplotlib.pyplot as plt\n"
-            # f"import matplotlib as mpl\n"
-            # # 更完整的中文字体配置
-            # f"plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'PingFang SC', 'Hiragino Sans GB', 'Heiti SC', 'DejaVu Sans', 'sans-serif']\n"
-            # f"plt.rcParams['axes.unicode_minus'] = False\n"
-            # f"plt.rcParams['font.family'] = 'sans-serif'\n"
-            # f"mpl.rcParams['font.size'] = 12\n"
-            # f"mpl.rcParams['axes.labelsize'] = 12\n"
-            # f"mpl.rcParams['xtick.labelsize'] = 10\n"
-            # f"mpl.rcParams['ytick.labelsize'] = 10\n"
-            # # 设置DPI以获得更清晰的显示
+            "import os, sys, platform, json\n"
+            f"work_dir = {repr(os.path.abspath(self.work_dir))}\n"
+            "os.makedirs(work_dir, exist_ok=True)\n"
+            "os.chdir(work_dir)\n"
+            "print('当前工作目录:', os.getcwd())\n"
+            "print('当前 Python 可执行文件:', sys.executable)\n"
+            "print('Python 版本:', platform.python_version())\n"
+            "\n"
+            "def _detect_ques_count():\n"
+            "    # 1) 显式指定优先\n"
+            "    v = os.environ.get('MMA_QUES_COUNT')\n"
+            "    if v and v.isdigit() and int(v) > 0:\n"
+            "        return int(v)\n"
+            "    # 2) 仅在 task_id 和 日志根 都明确时尝试读取日志（避免“编号日志”误用）\n"
+            "    tid = os.environ.get('MMA_TASK_ID')\n"
+            "    log_root = os.environ.get('MMA_LOG_ROOT')\n"
+            "    if tid and log_root:\n"
+            "        p = os.path.join(log_root, f'{tid}.json')\n"
+            "        if os.path.exists(p):\n"
+            "            try:\n"
+            "                with open(p, 'r', encoding='utf-8') as f:\n"
+            "                    data = json.load(f)\n"
+            "                items = data if isinstance(data, list) else [data]\n"
+            "                for m in reversed(items):\n"
+            "                    c = m.get('content', {}) if isinstance(m, dict) else {}\n"
+            "                    if isinstance(c, dict):\n"
+            "                        q = c.get('ques_count')\n"
+            "                        if isinstance(q, int) and q > 0:\n"
+            "                            return q\n"
+            "            except Exception as _e:\n"
+            "                print('[初始化] 读取日志失败:', _e)\n"
+            "    # 3) 回退默认\n"
+            "    return 6\n"
+            "\n"
+            "_q_count = _detect_ques_count()\n"
+            "print('\\n[题目数] 使用题目数 =', _q_count)\n"
+            "\n"
+            "import matplotlib as mpl\n"
+            "mpl.use('Agg')\n"
+            "import matplotlib.pyplot as plt\n"
+            "try:\n"
+            "    import seaborn as sns\n"
+            "    sns.set_style('whitegrid')\n"
+            "    sns.set_context('paper', font_scale=1.2)\n"
+            "except Exception as _e:\n"
+            "    print('[初始化] seaborn 不可用，跳过风格设置:', _e)\n"
+            "plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']\n"
+            "plt.rcParams['axes.unicode_minus'] = False\n"
+            "plt.rcParams['font.family'] = 'sans-serif'\n"
+            "mpl.rcParams['font.size'] = 12\n"
+            "mpl.rcParams['axes.labelsize'] = 12\n"
+            "mpl.rcParams['xtick.labelsize'] = 10\n"
+            "mpl.rcParams['ytick.labelsize'] = 10\n"
+            "\n"
+            "_sections = {'eda': ['datasets','figures','reports']}\n"
+            "for i in range(1, _q_count + 1):\n"
+            "    _sections[f'ques{i}'] = ['datasets','figures','reports']\n"
+            "_sections['sensitivity_analysis'] = ['datasets','figures','reports']\n"
+            "created = []\n"
+            "for sec, subs in _sections.items():\n"
+            "    for sub in subs:\n"
+            "        p = os.path.join(work_dir, sec, sub)\n"
+            "        os.makedirs(p, exist_ok=True)\n"
+            "        created.append(os.path.relpath(p, work_dir))\n"
+            "print('\\n[目录初始化] 已确保存在以下路径：')\n"
+            "for p in created: print(' -', p)\n"
+            "print('[目录初始化] 共计:', len(created), '个子目录\\n')\n"
         )
-        self.execute_code_(init_code)
+        try:
+            self.execute_code_(init_code)
+        except Exception:
+            logger.exception("预执行初始化代码时发生异常（但继续）")
 
     async def execute_code(self, code: str) -> tuple[str, bool, str]:
         logger.info(f"执行代码: {code}")
@@ -146,7 +228,10 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
                     break
             except:
                 if self.interrupt_signal:
-                    self.km.interrupt_kernel()
+                    try:
+                        self.km.interrupt_kernel()
+                    except Exception:
+                        logger.exception("中断内核时发生错误")
                     self.interrupt_signal = False
                 continue
 
@@ -211,19 +296,49 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
 
     async def cleanup(self):
         # 关闭内核
-        self.kc.shutdown()
-        logger.info("关闭内核")
-        self.km.shutdown_kernel()
+        try:
+            self.kc.shutdown()
+        except Exception:
+            logger.exception("关闭 kc 时出错（忽略）")
+        try:
+            logger.info("关闭内核")
+            self.km.shutdown_kernel()
+        except Exception:
+            logger.exception("关闭内核时出错（忽略）")
 
     def send_interrupt_signal(self):
         self.interrupt_signal = True
 
     def restart_jupyter_kernel(self):
         """Restart the Jupyter kernel and recreate the work directory."""
-        self.kc.shutdown()
-        self.km, self.kc = jupyter_client.manager.start_new_kernel(
-            kernel_name="python3"
-        )
+        try:
+            self.kc.shutdown()
+        except Exception:
+            logger.exception("重启前关闭 kc 出错（忽略）")
+
+        # 使用与 initialize 相同的策略启动（支持 env）
+        kernel_name = (os.environ.get("MMA_KERNEL_NAME") or "").strip()
+        python_exe = (os.environ.get("MMA_PYTHON_EXE") or "").strip()
+
+        try:
+            if kernel_name:
+                logger.info(f"重启：使用指定内核名称启动 Jupyter Kernel: {kernel_name}")
+                self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name=kernel_name)
+            elif python_exe:
+                logger.info(f"重启：使用指定 Python 可执行文件启动 ipykernel: {python_exe}")
+                km = KernelManager()
+                km.kernel_cmd = [python_exe, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+                km.start_kernel()
+                kc = km.client()
+                kc.start_channels()
+                self.km, self.kc = km, kc
+            else:
+                logger.info("重启：未设置 MMA_KERNEL_NAME / MMA_PYTHON_EXE，使用默认 kernel_name='python3'")
+                self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name="python3")
+        except Exception:
+            logger.exception("重启内核时发生异常，尝试使用默认 kernel_name='python3'")
+            self.km, self.kc = jupyter_client.manager.start_new_kernel(kernel_name="python3")
+
         self.interrupt_signal = False
         self._create_work_dir()
 
