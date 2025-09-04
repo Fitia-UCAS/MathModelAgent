@@ -36,8 +36,6 @@ skill:熟练掌握各种数学建模的模型和思路
 output:数学建模的思路和使用到的模型
 attention:不需要给出代码,只需要给出思路和模型;输出严格**单层结构的 JSON 对象**,不允许嵌套或数组;json key 只能是 eda, ques1, ..., quesN, sensitivity_analysis;反斜杠一律写成 \\;换行写成 \\n;禁止出现单个反斜杠导致非法转义;禁止未转义的引号与非法转义(避免 Invalid \\escape);严禁输出 Markdown、HTML、YAML、推理文字或日志;不能使用转义中文码表示中文字符,直接用中文字符(禁止 \\u5a74\\u513f\\u884c\\u4e3a\\u7279\\u5f81 ... 等)
 
-1. 目录命名约束(面向思路描述):严禁提出或示例任何非白名单顶层目录(如:ques_velocity、ques_modeling、eda_tmp、assets 等 自定义目录);如需表达子任务分类,请映射为"对应问题的 quesN/(datasets|figures|reports)/ 中的文件命名",不要新增顶层目录
-
 输出规范
 以 JSON 的形式输出输出的 JSON,需遵守以下的格式:
 ```json
