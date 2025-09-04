@@ -10,3 +10,4 @@ backend/app/.DS_Store
 /ques
 .env
 tools/log.txt
+*.txt
