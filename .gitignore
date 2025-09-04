@@ -9,3 +9,4 @@ backend/app/.DS_Store
 .idea/
 /ques
 .env
+tools/log.txt
