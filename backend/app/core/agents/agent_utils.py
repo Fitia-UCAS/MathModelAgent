@@ -413,3 +413,124 @@ class JsonDecoder:
         t = t.replace("'", '"')
         t = cls._fix_invalid_json_escapes(t)
         return t
+
+# 9 数据集管理：CoderDatasetManager（供 coder_agent 使用）
+# 9.1 说明：
+#   - 目的：统一枚举 <task_id> 工作目录下 {eda/, quesN/, sensitivity_analysis/}/datasets/ 内所有数据文件
+#   - 输出：任务内相对路径（正斜杠），可按分节分组或扁平列表
+#   - 规则：仅允许顶层目录 eda/、sensitivity_analysis/、quesN（N 为正整数）；仅扫描其下二级目录 datasets/
+#   - 扩展名：默认 { .csv, .xlsx, .xls, .parquet, .json }
+class CoderDatasetManager:
+    # 9.2 初始化
+    def __init__(self, task_id: str, exts: Set[str] | None = None) -> None:
+        self.task_id: str = str(task_id)
+        self.work_dir: Path = Path(get_work_dir(self.task_id)).resolve()
+        self.exts: Set[str] = set(exts) if exts else {
+            ".csv", ".xlsx", ".xls", ".parquet", ".json"
+        }
+
+    # 9.3 工具：规范化/剥离前缀/校验目录
+    # 9.3.1 统一分隔符、去空白
+    def _norm(self, p: str) -> str:
+        if p is None:
+            return ""
+        return str(p).strip().replace("\\", "/")
+
+    # 9.3.2 去掉 "<task_id>/" 前缀（若存在），统一为任务内相对路径
+    def _strip_task_prefix(self, p: str) -> str:
+        p = self._norm(p)
+        prefix = f"{self.task_id.strip().rstrip('/')}/"
+        if p.startswith(prefix):
+            return p[len(prefix):]
+        return p
+
+    # 9.3.3 顶层目录是否允许（返回规范化后的节名；不允许则返回空串）
+    def _as_allowed_section(self, name: str) -> str:
+        n = self._norm(name).lower().rstrip("/")
+        if n == "eda":
+            return "eda"
+        if n == "sensitivity_analysis":
+            return "sensitivity_analysis"
+        m = re.match(r"^ques(\d+)$", n)
+        if m:
+            return f"ques{m.group(1)}"
+        return ""
+
+    # 9.3.4 是否允许的数据扩展名
+    def _is_allowed_ext(self, path: Path) -> bool:
+        return path.suffix.lower() in self.exts
+
+    # 9.4 核心：按分节枚举
+    # 9.4.1 返回 dict：{section_name: [ "section/datasets/xxx.csv", ... ], ...}
+    def list_grouped_by_section(self) -> Dict[str, List[str]]:
+        grouped: Dict[str, List[str]] = {}
+
+        if not self.work_dir.exists():
+            return grouped
+
+        # 9.4.1.1 遍历顶层目录，仅限允许的分节
+        for child in self.work_dir.iterdir():
+            if not child.is_dir():
+                continue
+            sec = self._as_allowed_section(child.name)
+            if not sec:
+                continue
+
+            ds_dir = child / "datasets"
+            if not (ds_dir.exists() and ds_dir.is_dir()):
+                continue
+
+            # 9.4.1.2 深度递归枚举 datasets 下所有文件
+            paths: List[str] = []
+            for p in ds_dir.rglob("*"):
+                if p.is_file() and self._is_allowed_ext(p):
+                    rel = str(p.relative_to(self.work_dir)).replace("\\", "/")
+                    paths.append(rel)
+
+            if paths:
+                grouped[sec] = sorted(paths)
+
+        return grouped
+
+    # 9.5 扁平列表（不分组）
+    def list_all_dataset_paths(self) -> List[str]:
+        res: List[str] = []
+        grouped = self.list_grouped_by_section()
+        for _, arr in grouped.items():
+            res.extend(arr)
+        return sorted(res)
+
+    # 9.6 限定某一分节（eda / sensitivity_analysis / quesN）
+    def list_by_section(self, section_name: str) -> List[str]:
+        sec = self._as_allowed_section(section_name)
+        if not sec:
+            return []
+        return self.list_grouped_by_section().get(sec, [])
+
+    # 9.7 输出统一清单字典（便于直接注入到对话）
+    # 9.7.1 结构：
+    #   {
+    #     "tip": "系统自动枚举的 datasets 清单（相对路径）",
+    #     "paths": [...],
+    #     "by_section": {"eda": [...], "ques1": [...], ...},
+    #     "root": "<绝对工作目录>",
+    #     "exts": [".csv", ".xlsx", ...],
+    #     "updated_at": 1690000000
+    #   }
+    def build_manifest_dict(self) -> Dict:
+        grouped = self.list_grouped_by_section()
+        flat = []
+        for arr in grouped.values():
+            flat.extend(arr)
+        return {
+            "tip": "系统自动枚举的 datasets 清单（相对路径）",
+            "paths": sorted(set(flat)),
+            "by_section": {k: v for k, v in sorted(grouped.items())},
+            "root": self._norm(str(self.work_dir)),
+            "exts": sorted(self.exts),
+            "updated_at": int(time.time()),
+        }
+
+    # 9.8 便捷：JSON 字符串（ensure_ascii=False）
+    def build_manifest_json(self) -> str:
+        return json.dumps(self.build_manifest_dict(), ensure_ascii=False)

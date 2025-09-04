@@ -13,6 +13,11 @@ from app.core.prompts import get_reflection_prompt, get_completion_check_prompt
 from app.core.functions import coder_tools
 from icecream import ic
 
+# ==== 新增：枚举 datasets 清单 ====
+from app.core.agents.agent_utils import CoderDatasetManager
+# ==============================================================================
+
+
 # TODO: 时间等待过久，stop 进程
 # TODO: 支持 cuda
 # TODO: 引入创新方案：
@@ -47,6 +52,19 @@ class CoderAgent(Agent):  # 同样继承自Agent类
             await self.append_chat_history(
                 {"role": "system", "content": self.system_prompt}
             )
+
+            # ==== 新增：注入 <task_id> 下所有 {eda/, quesN/, sensitivity_analysis/}/datasets/ 清单 ====
+            # 说明：不改 prompts.py，由 CoderDatasetManager 枚举并注入一条用户消息
+            mgr = CoderDatasetManager(self.task_id)
+            dataset_manifest_json = mgr.build_manifest_json()
+            await self.append_chat_history(
+                {
+                    "role": "user",
+                    "content": f"datasets 清单: {dataset_manifest_json}",
+                }
+            )
+            # ===================================================================================================
+
             # 当前数据集文件
             await self.append_chat_history(
                 {
