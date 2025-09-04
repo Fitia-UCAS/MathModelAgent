@@ -6,6 +6,10 @@ import re
 from app.utils.log_util import logger
 from app.schemas.A2A import CoordinatorToModeler
 
+# ==== 新增：统一 JSON 解码与修复 ====
+from app.core.agents.agent_utils import JsonDecoder
+# ==============================================================================
+
 
 class CoordinatorAgent(Agent):
     def __init__(
@@ -34,16 +38,21 @@ class CoordinatorAgent(Agent):
         #     logger.info(f"拒绝回答用户非数学建模请求:{json_str}")
         #     raise ValueError(f"拒绝回答用户非数学建模请求:{json_str}")
 
-        # 清理 JSON 字符串
-        json_str = json_str.replace("```json", "").replace("```", "").strip()
-        # 移除可能的控制字符
-        json_str = re.sub(r"[\x00-\x1F\x7F]", "", json_str)
+        # === 改动点：不再手工清理，交给 JsonDecoder.sanitize 统一处理 ===
+        # # 清理 JSON 字符串
+        # json_str = json_str.replace("```json", "").replace("```", "").strip()
+        # # 移除可能的控制字符
+        # json_str = re.sub(r"[\x00-\x1F\x7F]", "", json_str)
+        # =====================================================================
 
         if not json_str:
             raise ValueError("返回的 JSON 字符串为空，请检查输入内容。")
 
         try:
-            questions = json.loads(json_str)
+            # ==== 先本地修复得到“合法 JSON 文本”，再用 json.loads 解析 ====
+            fixed_json_text = await JsonDecoder.sanitize(json_str)
+            questions = json.loads(fixed_json_text)
+            # =================================================================
             ques_count = questions["ques_count"]
             logger.info(f"questions:{questions}")
             return CoordinatorToModeler(questions=questions, ques_count=ques_count)
