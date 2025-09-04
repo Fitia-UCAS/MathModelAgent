@@ -230,3 +230,186 @@ class WriterImageManager:
         if self.manifest_path.exists():
             self.manifest_path.unlink()
         return str(self.manifest_path)
+# 8 JSON 解码与修复：JsonDecoder（纯本地）
+# 8.1 说明：
+#   - sanitize(raw) -> str：返回“可被 json.loads 成功解析”的合法 JSON 文本；失败抛 JSONDecodeError
+#   - decode(raw)   -> dict：等价于 json.loads(sanitize(raw))；根必须为对象
+#   - 流程：清理围栏/控制字符 → 提取首个 JSON → 修复非法反斜杠/行末续行/字符串裸换行 → 校验
+import json
+import re
+from typing import Optional, Any
+
+class JsonDecoder:
+    # 8.2 统一入口：返回“已修复的合法 JSON 文本”
+    @classmethod
+    async def sanitize(cls, raw: str) -> str:
+        # 8.2.1 初步清洗与提取
+        content = cls._strip_fences_outer_or_all(cls._clean_control_chars(raw, keep_whitespace=True))
+        json_str = cls._extract_first_json_block(content) or (content or "")
+        if not json_str.strip():
+            raise json.JSONDecodeError("empty json content", json_str, 0)
+
+        # 8.2.2 第一轮：最小必要修复
+        s1 = cls._fix_invalid_json_escapes(json_str)
+        s1 = cls._normalize_backslash_newline(s1)
+        s1 = cls._escape_raw_newlines_in_json_strings(s1)
+        if cls._is_valid_json_object(s1):
+            return s1
+
+        # 8.2.3 第二轮：宽松回退
+        s2 = cls._fallback_relax(s1)
+        if cls._is_valid_json_object(s2):
+            return s2
+
+        # 8.2.4 失败即抛（与 json.loads 异常类型对齐）
+        raise json.JSONDecodeError("unparseable json after local fixes", json_str, 0)
+
+    # 8.3 便捷入口：直接返回 dict（内部就是 sanitize + json.loads）
+    @classmethod
+    async def decode(cls, raw: str) -> dict:
+        fixed = await cls.sanitize(raw)
+        obj = json.loads(fixed)
+        if not isinstance(obj, dict):
+            # 根必须为对象，方便上层直接取 'ques_count'
+            raise json.JSONDecodeError("root must be a JSON object", fixed, 0)
+        return obj
+
+    # 8.4 判定“JSON 文本是否合法且根为对象”
+    @staticmethod
+    def _is_valid_json_object(s: str) -> bool:
+        try:
+            v = json.loads(s)
+            return isinstance(v, dict)
+        except Exception:
+            return False
+
+    # 8.5 清理控制字符（保留 \n \r \t）
+    @staticmethod
+    def _clean_control_chars(s: str, keep_whitespace: bool = True) -> str:
+        if not s:
+            return ""
+        if s and s[0] == "\ufeff":  # 去 BOM
+            s = s[1:]
+        if keep_whitespace:
+            return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", s)
+        return re.sub(r"[\x00-\x1F\x7F]", "", s)
+
+    # 8.6 去掉 ```json ... ``` 或 ``` ... ``` 围栏（若存在）
+    @staticmethod
+    def _strip_fences_outer_or_all(s: str) -> str:
+        if not s:
+            return ""
+        s = s.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s*```$", "", s)
+        return s.strip()
+
+    # 8.7 提取首个配平的 JSON 对象（栈法，跳过字符串与转义）
+    @staticmethod
+    def _extract_first_json_block(s: str) -> Optional[str]:
+        if not s:
+            return None
+        start = s.find("{")
+        if start == -1:
+            return None
+        i = start
+        depth = 0
+        in_str = False
+        esc = False
+        while i < len(s):
+            ch = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return s[start : i + 1]
+            i += 1
+        return None
+
+    # 8.8 把非法“单反斜杠转义”改为“合法双反斜杠”
+    @staticmethod
+    def _fix_invalid_json_escapes(s: str) -> str:
+        # 合法转义首字符：" \/ b f n r t u
+        return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", s)
+
+    # 8.9 处理反斜杠续行（反斜杠 + 真实换行 → \\n）
+    @staticmethod
+    def _normalize_backslash_newline(s: str) -> str:
+        return re.sub(r"\\\r?\n", r"\\n", s)
+
+    # 8.10 JSON 字符串字面量内部的真实换行/回车 → \\n（状态机）
+    @staticmethod
+    def _escape_raw_newlines_in_json_strings(s: str) -> str:
+        out = []
+        in_str = False
+        pending_backslash = False
+        i = 0
+        L = len(s)
+        while i < L:
+            ch = s[i]
+            if not in_str:
+                out.append(ch)
+                if ch == '"':
+                    in_str = True
+                    pending_backslash = False
+                i += 1
+                continue
+
+            if pending_backslash:
+                if ch in ['"', "\\", "/", "b", "f", "n", "r", "t"]:
+                    out.append("\\" + ch)
+                elif ch == "u" and i + 4 < L and re.match(r"[0-9a-fA-F]{4}", s[i + 1 : i + 5]):
+                    out.append("\\u" + s[i + 1 : i + 5])
+                    i += 4
+                elif ch in ("\n", "\r"):
+                    out.append("\\n")
+                else:
+                    out.append("\\\\")
+                    out.append(ch)
+                pending_backslash = False
+                i += 1
+                continue
+
+            if ch == "\\":
+                pending_backslash = True
+                i += 1
+                continue
+
+            if ch == '"':
+                out.append(ch)
+                in_str = False
+                i += 1
+                continue
+
+            if ch in ("\n", "\r"):
+                out.append("\\n")
+                i += 1
+                continue
+
+            out.append(ch)
+            i += 1
+
+        if pending_backslash:
+            out.append("\\\\")
+        return "".join(out)
+
+    # 8.11 宽松回退：去尾逗号、单引号→双引号、再次修复非法反斜杠
+    @classmethod
+    def _fallback_relax(cls, s: str) -> str:
+        t = re.sub(r",\s*}", "}", s)
+        t = re.sub(r",\s*]", "]", t)
+        t = t.replace("'", '"')
+        t = cls._fix_invalid_json_escapes(t)
+        return t
